@@ -147,7 +147,7 @@ def bfs_sample(adj, roots, max_lvl_size):
         current_lvl = next_lvl
 
 
-def get_splits(y, train_idx, test_idx, validation=True):
+def get_splits(y, train_idx, valid_idx, test_idx, validation=True):
     # Make dataset splits
     # np.random.shuffle(train_idx)
     if validation:
@@ -156,7 +156,7 @@ def get_splits(y, train_idx, test_idx, validation=True):
         idx_test = idx_val  # report final score on validation set for hyperparameter optimization
     else:
         idx_train = train_idx
-        idx_val = train_idx  # no validation
+        idx_val = valid_idx  # no validation
         idx_test = test_idx
 
     # y_train = np.zeros(y.shape)
