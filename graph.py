@@ -74,10 +74,11 @@ def process_batch(all_text_input, all_text_lengths,
 
 
 class GCNModel(nn.Module):
-    def __init__(self, num_features, num_nodes, hidden, support, num_bases, num_classes, relation='distmult'):
+    def __init__(self, num_features, num_nodes, hidden, support, num_bases, num_classes, 
+        text_model='SkipThought', relation='distmult'):
         super(GCNModel, self).__init__()
 
-        self.input_layer = InputLayer(num_features)
+        self.input_layer = InputLayer(num_features, text_model)
         self.gc1 = GraphConvolution(num_nodes, hidden, support, num_bases=num_bases,
             activation='relu')
         self.gc2 = GraphConvolution(hidden, hidden, support, num_bases=num_bases,

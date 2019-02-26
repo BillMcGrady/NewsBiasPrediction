@@ -57,7 +57,7 @@ HIDDEN = args['hidden']
 BASES = args['bases']
 DO = args['dropout']
 use_cuda = True
-MODEL_NAME = DATASET + '_skip30_random'
+MODEL_NAME = DATASET + '_hlstm30_random'
 # LOAD_MODEL_NAME = DATASET + '_Netonly'
 
 dirname = os.path.dirname(os.path.realpath(sys.argv[0]))
@@ -81,6 +81,13 @@ print(train_idx, test_idx.shape)
 y = np.array(y.todense())
 labels = np.argmax(y, axis=1)
 
+
+fin = open('%s_unsup_pred.pickle' % DATASET, 'rb')
+label_preds = pkl.load(fin)
+print(label_preds.shape)
+fin.close()
+
+
 # print(type(train_idx), len(train_idx))
 # print(type(test_idx), len(test_idx))
 # print(type(A), type(y))
@@ -94,7 +101,7 @@ labels = np.argmax(y, axis=1)
 
 # Get dataset splits
 idx_train, idx_valid, idx_test = get_splits(y, train_idx, valid_idx, test_idx, VALIDATION)
-
+idx_train_set, idx_test_set = set(idx_train), set(idx_test)
 num_nodes = A[0].shape[0]
 support = len(A)
 
@@ -179,7 +186,8 @@ print(len(node2adj))
 
 # Compile model
 num_features = 16
-model = GCNModel(num_features, num_nodes, HIDDEN, support, BASES, y.shape[1], relation='distmult')
+model = GCNModel(num_features, num_nodes, HIDDEN, support, BASES, y.shape[1], 
+    text_model='HLSTM', relation='distmult')
 # model.load_state_dict(torch.load('result/%s' % (LOAD_MODEL_NAME)))
 print(len(list(model.parameters())))
 
@@ -211,9 +219,11 @@ if (use_cuda):
 best_acc = 0
 best_loss = 10000000
 num_docs = 12127-1742
-text_batch_size = num_docs
+text_batch_size = 30
+best_result = None
 # Fit
 for epoch in range(1, NB_EPOCH + 1):
+    # break
 
     # Log wall-clock time
     t = time.time()
@@ -237,8 +247,25 @@ for epoch in range(1, NB_EPOCH + 1):
     # exit()
 
     loss_train = cross_entropy_loss(scores[idx_train], labels_train)
-    # loss_train.backward()
-    # optimizer.step()
+
+    # supervised case
+    # doctext_idx_list = torch.LongTensor(idx_train[135:]-1742).cuda()
+    # batch_input = model.input_layer.get_doc_embed(doctext_idx_list)
+    # scores_text = model.clf_bias(batch_input)
+    # loss_text = cross_entropy_loss(scores_text, 
+    #     labels_train[135:])
+    # loss_train += loss_text
+
+    # unsupervised case 
+    # doctext_idx_list = torch.LongTensor(idx_test-1742).cuda()
+    # batch_input = model.input_layer.get_doc_embed(doctext_idx_list)
+    # scores_text = model.clf_bias(batch_input)
+    # loss_text = cross_entropy_loss(scores_text, 
+    #     torch.cuda.LongTensor(label_preds[idx_test]))
+    # loss_train += loss_text
+
+    loss_train.backward()
+    optimizer.step()
     '''
     rela1_scores = torch.sigmoid(model.clf_rela1
         (embeds_final[rela1[0]], embeds_final[rela1[1]]).view(-1))
@@ -272,16 +299,18 @@ for epoch in range(1, NB_EPOCH + 1):
             end = num_docs
         doc_idx_list_raw = text_idx_perm[start:end]
 
-        # embeds_0 = inputs[0] # model.input_layer()
-        # embeds_1 = model.gc1([embeds_0] + inputs[1:])
-        # embeds_2 = model.gc2([embeds_1] + inputs[1:])
-        # embeds_final = embeds_2
+        embeds_0 = inputs[0] # model.input_layer()
+        embeds_1 = model.gc1([embeds_0] + inputs[1:])
+        embeds_2 = model.gc2([embeds_1] + inputs[1:])
+        embeds_final = embeds_2
     
-        doctext_idx_list, docnode_pos_idx, docnode_neg_idx = [], [], []
-        for doctext_idx in doc_idx_list_raw:
+        doctext_idx_list, docnode_pos_idx, docnode_neg_idx, doctext_flag = [], [], [], []
+        for tidx, doctext_idx in enumerate(doc_idx_list_raw):
             doctext_idx_list.append(doctext_idx)
             docnode_pos_idx.append(doctext_idx+1742)
             docnode_neg_idx.append(np.random.randint(1742, 12127, size=(5)))
+            if (doctext_idx+1742 in idx_train_set):
+                doctext_flag.append(tidx)
         docnode_pos_idx = np.array(docnode_pos_idx).reshape(-1, 1)
         docnode_neg_idx = np.array(docnode_neg_idx)
         docnode_idx_list = np.concatenate((docnode_pos_idx, docnode_neg_idx), axis=1)
@@ -289,14 +318,25 @@ for epoch in range(1, NB_EPOCH + 1):
         doctext_idx_list = torch.LongTensor(doctext_idx_list).cuda()
         batch_input = model.input_layer.get_doc_embed(doctext_idx_list)
         docnode_idx_list = torch.cuda.LongTensor(docnode_idx_list).cuda()
-        batch_target = model.gc1.W[0].index_select(0, docnode_idx_list.view(-1)).view(-1, 6, num_features)
+        # batch_target = model.gc1.W[0].index_select(0, docnode_idx_list.view(-1)).view(-1, 6, num_features)
+        batch_target = embeds_final.index_select(0, docnode_idx_list.view(-1)).view(-1, 6, num_features)
 
         batch_scores = torch.bmm(batch_target, 
             batch_input.view(-1, num_features, 1)).squeeze()
         batch_labels = torch.LongTensor([0] * len(doctext_idx_list)).cuda()
         loss_text_node = cross_entropy_loss(batch_scores, batch_labels)
+
+        if (len(doctext_flag) > 0):
+            scores_text = model.clf_bias(batch_input)
+            loss_text = cross_entropy_loss(scores_text[doctext_flag], 
+                torch.LongTensor(labels[docnode_pos_idx][doctext_flag]).cuda().view(-1))
+        else:
+            loss_text = 0
+        # print(scores_text[doctext_flag].size())
+        # print(loss_text)
+
         # print(loss_train.item(), loss_text_node.item())
-        loss_train += 0.2 * loss_text_node
+        loss_train = 1.0 * loss_text_node + loss_text
         # print(loss_train)
         loss_train.backward()
         optimizer.step()
@@ -375,11 +415,14 @@ for epoch in range(1, NB_EPOCH + 1):
                 end = num_docs
             doc_idx_list_raw = text_idx_perm[start:end]
             doctext_idx_list = torch.LongTensor(doc_idx_list_raw).cuda()
-            batch_input = torch.mm(model.input_layer.get_doc_embed(doctext_idx_list),
-                model.gc2.W[0])
+            batch_input = model.input_layer.get_doc_embed(doctext_idx_list)
+                # torch.mm(model.gc2.W[0])
             scores_text.extend(list(model.clf_bias(batch_input).data.cpu().numpy()))
         scores_text = torch.FloatTensor(scores_text).cuda()
         preds_shareu = torch.argmax(scores_text, dim=1)
+        # print(idx_train-1742)
+        # print(preds_shareu[idx_train-1742])
+        # exit()
         correct_train_shareu = torch.sum(preds_shareu[idx_train-1742] == labels_train)
         correct_valid_shareu = torch.sum(preds_shareu[idx_valid-1742] == labels_valid)
         correct_test_shareu = torch.sum(preds_shareu[idx_test-1742] == labels_test)
@@ -398,6 +441,8 @@ for epoch in range(1, NB_EPOCH + 1):
         test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
         print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
         
+        valid_acc_select = valid_acc_shareu
+
         loss_train_val = loss_train.item()
         loss_valid_val = loss_valid.item()
         loss_test_val = loss_test.item()
@@ -432,7 +477,66 @@ fout.write(str(best_result) + '\n')
 fout.close()
 
 # Testing
-# test_loss, test_acc = evaluate_preds(preds, [y_test], [idx_test])
-# print("Test set results:",
-#       "loss= {:.4f}".format(test_loss[0]),
-#       "accuracy= {:.4f}".format(test_acc[0]))
+model.load_state_dict(torch.load('result/%s' % (MODEL_NAME)))
+# Predict on full dataset
+embeds_0 = inputs[0] # model.input_layer()
+embeds_1 = model.gc1([embeds_0] + inputs[1:])
+embeds_2 = model.gc2([embeds_1] + inputs[1:])
+# embeds_3 = gc2([embeds_2] + inputs[1:])
+scores = model.clf_bias(embeds_2)
+preds = torch.argmax(scores, dim=1)
+loss_train = cross_entropy_loss(scores[idx_train], labels_train)
+correct_train = torch.sum(preds[idx_train] == labels_train)
+loss_valid = cross_entropy_loss(scores[idx_valid], labels_valid)
+correct_valid = torch.sum(preds[idx_valid] == labels_valid)
+loss_test = cross_entropy_loss(scores[idx_test], labels_test)
+correct_test = torch.sum(preds[idx_test] == labels_test)
+
+scores_shareu = []
+scores_value = scores.data.cpu().numpy()
+for node in range(12127):
+    scores_t = np.zeros(3) 
+    if (node not in node2adj):
+        scores_shareu.append(scores_t)
+        continue
+
+    adj = list(node2adj[node])
+    
+    # this_doc_embed = doc_embed[node-1739]
+    # adj_embed = output_embed[adj]
+    # adj_coef = softmax(np.matmul(adj_embed, this_doc_embed).reshape(1, -1)).reshape(-1)
+    adj_coef = [1/len(adj)] * len(adj)
+    # print(adj_coef, adj_coef.shape)
+    
+    for user, coef in zip(adj, adj_coef):
+        scores_t += coef * scores_value[user]#-135] # when use score from 2nd GCN
+        # print(output_score[user])
+    # print(scores)
+    scores_shareu.append(scores_t) #/len(adj))
+    # print(node, adj, gold[-1], pred[-1])
+scores_shareu = torch.FloatTensor(np.array(scores_shareu)).cuda()
+preds_shareu = torch.argmax(scores_shareu, dim=1)
+
+correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
+correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
+correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
+train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
+valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
+test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
+print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
+
+scores_shareu += scores
+preds_shareu = torch.argmax(scores_shareu, dim=1)
+correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
+correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
+correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
+train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
+valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
+test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
+print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
+
+# fout = open('%s_unsup_pred.pickle' % DATASET, 'wb')
+# preds_numpy = preds_shareu.data.cpu().numpy()
+# print(preds_numpy.shape)
+# pkl.dump(preds_numpy, fout)
+# fout.close()
