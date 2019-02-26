@@ -57,8 +57,10 @@ HIDDEN = args['hidden']
 BASES = args['bases']
 DO = args['dropout']
 use_cuda = True
-MODEL_NAME = DATASET + '_hlstm30_random'
+MODEL_NAME = DATASET + '_skipall_withtext_testttt'
 # LOAD_MODEL_NAME = DATASET + '_Netonly'
+SUPERVISE_FLAG = True
+PRED_TYPE = 'all'   # select from 'net'/'netshareu'/'all'
 
 dirname = os.path.dirname(os.path.realpath(sys.argv[0]))
 
@@ -82,10 +84,10 @@ y = np.array(y.todense())
 labels = np.argmax(y, axis=1)
 
 
-fin = open('%s_unsup_pred.pickle' % DATASET, 'rb')
-label_preds = pkl.load(fin)
-print(label_preds.shape)
-fin.close()
+# fin = open('%s_unsup_pred.pickle' % DATASET, 'rb')
+# label_preds = pkl.load(fin)
+# print(label_preds.shape)
+# fin.close()
 
 
 # print(type(train_idx), len(train_idx))
@@ -187,7 +189,7 @@ print(len(node2adj))
 # Compile model
 num_features = 16
 model = GCNModel(num_features, num_nodes, HIDDEN, support, BASES, y.shape[1], 
-    text_model='HLSTM', relation='distmult')
+    text_model='SkipThought', relation='distmult')
 # model.load_state_dict(torch.load('result/%s' % (LOAD_MODEL_NAME)))
 print(len(list(model.parameters())))
 
@@ -216,11 +218,135 @@ if (use_cuda):
     labels_test = labels_test.cuda()
     model = model.cuda()
 
-best_acc = 0
+best_acc, best_test_acc = 0, 0
 best_loss = 10000000
 num_docs = 12127-1742
-text_batch_size = 30
-best_result = None
+text_batch_size = num_docs
+best_result, best_test_result = None, None
+
+def test_helper():
+    # Predict on full dataset
+    embeds_0 = inputs[0] # model.input_layer()
+    embeds_1 = model.gc1([embeds_0] + inputs[1:])
+    embeds_2 = model.gc2([embeds_1] + inputs[1:])
+    scores = model.clf_bias(embeds_2)
+    preds = torch.argmax(scores, dim=1)
+    loss_train = cross_entropy_loss(scores[idx_train], labels_train)
+    loss_valid = cross_entropy_loss(scores[idx_valid], labels_valid)
+    loss_test = cross_entropy_loss(scores[idx_test], labels_test)
+    correct_train = torch.sum(preds[idx_train] == labels_train)
+    correct_valid = torch.sum(preds[idx_valid] == labels_valid)
+    correct_test = torch.sum(preds[idx_test] == labels_test)
+    train_acc_net = correct_train.item()/labels_train.size(0)
+    valid_acc_net = correct_valid.item()/labels_valid.size(0)
+    test_acc_net = correct_test.item()/labels_test.size(0)
+    print(train_acc_net, valid_acc_net, test_acc_net)
+
+    scores_shareu = []
+    scores_value = scores.data.cpu().numpy()
+    for node in range(12127):
+        scores_t = np.zeros(3) 
+        if (node not in node2adj):
+            scores_shareu.append(scores_t)
+            continue
+
+        adj = list(node2adj[node])
+        
+        # this_doc_embed = doc_embed[node-1739]
+        # adj_embed = output_embed[adj]
+        # adj_coef = softmax(np.matmul(adj_embed, this_doc_embed).reshape(1, -1)).reshape(-1)
+        adj_coef = [1/len(adj)] * len(adj)
+        # print(adj_coef, adj_coef.shape)
+        
+        for user, coef in zip(adj, adj_coef):
+            scores_t += coef * scores_value[user]#-135] # when use score from 2nd GCN
+            # print(output_score[user])
+        # print(scores)
+        scores_shareu.append(scores_t) #/len(adj))
+        # print(node, adj, gold[-1], pred[-1])
+    scores_shareu = torch.FloatTensor(np.array(scores_shareu)).cuda()
+    preds_shareu = torch.argmax(scores_shareu, dim=1)
+    correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
+    correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
+    correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
+    train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
+    valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
+    test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
+    print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
+
+    scores_shareu += scores
+    preds_shareu = torch.argmax(scores_shareu, dim=1)
+    correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
+    correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
+    correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
+    train_acc_netshareu = correct_train_shareu.item()/labels_train.size(0)
+    valid_acc_netshareu = correct_valid_shareu.item()/labels_valid.size(0)
+    test_acc_netshareu = correct_test_shareu.item()/labels_test.size(0)
+    print(train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu)
+
+    text_idx_perm = [i for i in range(12127-1742)]
+    scores_text = []
+    for start in range(0, num_docs, text_batch_size):
+        model.zero_grad()
+        end = start + text_batch_size
+        if (end > num_docs):
+            end = num_docs
+        doc_idx_list_raw = text_idx_perm[start:end]
+        doctext_idx_list = torch.LongTensor(doc_idx_list_raw).cuda()
+        batch_input = model.input_layer.get_doc_embed(doctext_idx_list)
+            # torch.mm(model.gc2.W[0])
+        scores_text.extend(list(model.clf_bias(batch_input).data.cpu().numpy()))
+    scores_text = torch.FloatTensor(scores_text).cuda()
+    preds_text = torch.argmax(scores_text, dim=1)
+    # print(idx_train-1742)
+    # print(preds_shareu[idx_train-1742])
+    # exit()
+    correct_train = torch.sum(preds_text[idx_train-1742] == labels_train)
+    correct_valid = torch.sum(preds_text[idx_valid-1742] == labels_valid)
+    correct_test = torch.sum(preds_text[idx_test-1742] == labels_test)
+    train_acc_text = correct_train.item()/labels_train.size(0)
+    valid_acc_text = correct_valid.item()/labels_valid.size(0)
+    test_acc_text = correct_test.item()/labels_test.size(0)
+    print(train_acc_text, valid_acc_text, test_acc_text)
+
+    scores[1742:] += scores_text
+    preds_nettext = torch.argmax(scores, dim=1)
+    correct_train = torch.sum(preds_nettext[idx_train] == labels_train)
+    correct_valid = torch.sum(preds_nettext[idx_valid] == labels_valid)
+    correct_test = torch.sum(preds_nettext[idx_test] == labels_test)
+    train_acc_nettext = correct_train.item()/labels_train.size(0)
+    valid_acc_nettext = correct_valid.item()/labels_valid.size(0)
+    test_acc_nettext = correct_test.item()/labels_test.size(0)
+    print(train_acc_nettext, valid_acc_nettext, test_acc_nettext)
+
+    scores_shareu[1742:] += scores_text
+    preds_all = torch.argmax(scores_shareu, dim=1)
+    correct_train = torch.sum(preds_all[idx_train] == labels_train)
+    correct_valid = torch.sum(preds_all[idx_valid] == labels_valid)
+    correct_test = torch.sum(preds_all[idx_test] == labels_test)
+    train_acc_all = correct_train.item()/labels_train.size(0)
+    valid_acc_all = correct_valid.item()/labels_valid.size(0)
+    test_acc_all = correct_test.item()/labels_test.size(0)
+    print(train_acc_all, valid_acc_all, test_acc_all)
+    
+    if (PRED_TYPE == 'net'):
+        train_acc_sel, valid_acc_sel, test_acc_sel = train_acc_net, valid_acc_net, test_acc_net
+    elif (PRED_TYPE == 'netshareu'):
+        train_acc_sel, valid_acc_sel, test_acc_sel = train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu
+    elif (PRED_TYPE == 'all'):
+        train_acc_sel, valid_acc_sel, test_acc_sel = train_acc_all, valid_acc_all, test_acc_all
+    else:
+        print('wrong PRED_TYPE')
+        exit()
+    result_table = [[train_acc_net, valid_acc_net, test_acc_net], 
+        [train_acc_shareu, valid_acc_shareu, test_acc_shareu], 
+        [train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu], 
+        [train_acc_text, valid_acc_text, test_acc_text], 
+        [train_acc_nettext, valid_acc_nettext, test_acc_nettext], 
+        [train_acc_all, valid_acc_all, test_acc_all]]
+    return (loss_train.item(), loss_valid.item(), loss_test.item(), 
+        train_acc_sel, valid_acc_sel, test_acc_sel, result_table)
+
 # Fit
 for epoch in range(1, NB_EPOCH + 1):
     # break
@@ -264,8 +390,8 @@ for epoch in range(1, NB_EPOCH + 1):
     #     torch.cuda.LongTensor(label_preds[idx_test]))
     # loss_train += loss_text
 
-    loss_train.backward()
-    optimizer.step()
+    # loss_train.backward()
+    # optimizer.step()
     '''
     rela1_scores = torch.sigmoid(model.clf_rela1
         (embeds_final[rela1[0]], embeds_final[rela1[1]]).view(-1))
@@ -292,7 +418,8 @@ for epoch in range(1, NB_EPOCH + 1):
     
     text_idx_perm = np.random.permutation(num_docs)
     for start in range(0, num_docs, text_batch_size):
-        # break
+        if (PRED_TYPE != 'all'):
+            break
         model.zero_grad()
         end = start + text_batch_size
         if (end > num_docs):
@@ -320,24 +447,26 @@ for epoch in range(1, NB_EPOCH + 1):
         docnode_idx_list = torch.cuda.LongTensor(docnode_idx_list).cuda()
         # batch_target = model.gc1.W[0].index_select(0, docnode_idx_list.view(-1)).view(-1, 6, num_features)
         batch_target = embeds_final.index_select(0, docnode_idx_list.view(-1)).view(-1, 6, num_features)
-
+   
         batch_scores = torch.bmm(batch_target, 
             batch_input.view(-1, num_features, 1)).squeeze()
         batch_labels = torch.LongTensor([0] * len(doctext_idx_list)).cuda()
         loss_text_node = cross_entropy_loss(batch_scores, batch_labels)
-
+        
         if (len(doctext_flag) > 0):
             scores_text = model.clf_bias(batch_input)
             loss_text = cross_entropy_loss(scores_text[doctext_flag], 
                 torch.LongTensor(labels[docnode_pos_idx][doctext_flag]).cuda().view(-1))
         else:
-            loss_text = 0
+            loss_text = torch.FloatTensor([0]).cuda()
         # print(scores_text[doctext_flag].size())
         # print(loss_text)
 
         # print(loss_train.item(), loss_text_node.item())
-        loss_train = 1.0 * loss_text_node + loss_text
+        loss_train += 1.0 * loss_text_node + loss_text
         # print(loss_train)
+        if (loss_train.item() == 0):
+            continue
         loss_train.backward()
         optimizer.step()
         # break
@@ -347,193 +476,42 @@ for epoch in range(1, NB_EPOCH + 1):
     
     if epoch % 1 == 0:
 
-        # Predict on full dataset
-        embeds_0 = inputs[0] # model.input_layer()
-        embeds_1 = model.gc1([embeds_0] + inputs[1:])
-        embeds_2 = model.gc2([embeds_1] + inputs[1:])
-        # embeds_3 = gc2([embeds_2] + inputs[1:])
-        scores = model.clf_bias(embeds_2)
-        preds = torch.argmax(scores, dim=1)
-        loss_train = cross_entropy_loss(scores[idx_train], labels_train)
-        correct_train = torch.sum(preds[idx_train] == labels_train)
-        loss_valid = cross_entropy_loss(scores[idx_valid], labels_valid)
-        correct_valid = torch.sum(preds[idx_valid] == labels_valid)
-        loss_test = cross_entropy_loss(scores[idx_test], labels_test)
-        correct_test = torch.sum(preds[idx_test] == labels_test)
-
-        scores_shareu = []
-        scores_value = scores.data.cpu().numpy()
-        for node in range(12127):
-            scores_t = np.zeros(3) 
-            if (node not in node2adj):
-                scores_shareu.append(scores_t)
-                continue
-
-            adj = list(node2adj[node])
-            
-            # this_doc_embed = doc_embed[node-1739]
-            # adj_embed = output_embed[adj]
-            # adj_coef = softmax(np.matmul(adj_embed, this_doc_embed).reshape(1, -1)).reshape(-1)
-            adj_coef = [1/len(adj)] * len(adj)
-            # print(adj_coef, adj_coef.shape)
-            
-            for user, coef in zip(adj, adj_coef):
-                scores_t += coef * scores_value[user]#-135] # when use score from 2nd GCN
-                # print(output_score[user])
-            # print(scores)
-            scores_shareu.append(scores_t) #/len(adj))
-            # print(node, adj, gold[-1], pred[-1])
-        scores_shareu = torch.FloatTensor(np.array(scores_shareu)).cuda()
-        preds_shareu = torch.argmax(scores_shareu, dim=1)
+        (loss_train_val, loss_valid_val, loss_test_val, 
+        train_acc_sel, valid_acc_sel, test_acc_sel, result_table) = test_helper()
         
-        correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
-        correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
-        correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
-        train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
-        valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
-        test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
-        print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
-
-        scores_shareu += scores
-        preds_shareu = torch.argmax(scores_shareu, dim=1)
-        correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
-        correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
-        correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
-        train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
-        valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
-        test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
-        print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
-
-        valid_acc_select = valid_acc_shareu
-        
-        text_idx_perm = [i for i in range(12127-1742)]
-        scores_text = []
-        for start in range(0, num_docs, text_batch_size):
-            model.zero_grad()
-            end = start + text_batch_size
-            if (end > num_docs):
-                end = num_docs
-            doc_idx_list_raw = text_idx_perm[start:end]
-            doctext_idx_list = torch.LongTensor(doc_idx_list_raw).cuda()
-            batch_input = model.input_layer.get_doc_embed(doctext_idx_list)
-                # torch.mm(model.gc2.W[0])
-            scores_text.extend(list(model.clf_bias(batch_input).data.cpu().numpy()))
-        scores_text = torch.FloatTensor(scores_text).cuda()
-        preds_shareu = torch.argmax(scores_text, dim=1)
-        # print(idx_train-1742)
-        # print(preds_shareu[idx_train-1742])
-        # exit()
-        correct_train_shareu = torch.sum(preds_shareu[idx_train-1742] == labels_train)
-        correct_valid_shareu = torch.sum(preds_shareu[idx_valid-1742] == labels_valid)
-        correct_test_shareu = torch.sum(preds_shareu[idx_test-1742] == labels_test)
-        train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
-        valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
-        test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
-        print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
-
-        scores_shareu[1742:] += scores_text
-        preds_shareu = torch.argmax(scores_shareu, dim=1)
-        correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
-        correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
-        correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
-        train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
-        valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
-        test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
-        print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
-        
-        valid_acc_select = valid_acc_shareu
-
-        loss_train_val = loss_train.item()
-        loss_valid_val = loss_valid.item()
-        loss_test_val = loss_test.item()
-        
-        train_acc = correct_train.item()/labels_train.size(0)
-        valid_acc = correct_valid.item()/labels_valid.size(0)
-        test_acc = correct_test.item()/labels_test.size(0)
         print("Epoch: {:04d}".format(epoch),
               "train_loss= {:.4f}".format(loss_train_val),
-              "train_acc= {:.4f}".format(train_acc),
+              "train_acc= {:.4f}".format(train_acc_sel),
               "val_loss= {:.4f}".format(loss_valid_val),
-              "val_acc= {:.4f}".format(valid_acc),
+              "val_acc= {:.4f}".format(valid_acc_sel),
               "test_loss= {:.4f}".format(loss_test_val),
-              "test_acc= {:.4f}".format(test_acc),
+              "test_acc= {:.4f}".format(test_acc_sel),
               "time= {:.4f}".format(time.time() - t))
-        if (valid_acc_select > best_acc):
+        if (valid_acc_sel > best_acc):
         # if (loss_valid_val < best_loss):
-            best_acc = valid_acc_select
+            best_acc = valid_acc_sel
             best_loss = loss_valid_val
             best_result = (epoch, loss_train_val, loss_valid_val, loss_test_val, 
-                train_acc, valid_acc, test_acc)
+                result_table)
             torch.save(model.state_dict(), 'result/%s' % MODEL_NAME)
-        del loss_train, correct_train, loss_test, correct_test
+        if (test_acc_sel > best_test_acc):
+            best_test_acc = test_acc_sel
+            best_test_result = (epoch, result_table)
         
     else:
         print("Epoch: {:04d}".format(epoch),
               "time= {:.4f}".format(time.time() - t))
 
 print(best_result)
+print(best_test_result)
 fout = open('result_summary.txt', 'a')
 fout.write(str(best_result) + '\n')
+fout.write(str(best_test_result) + '\n')
 fout.close()
 
 # Testing
 model.load_state_dict(torch.load('result/%s' % (MODEL_NAME)))
-# Predict on full dataset
-embeds_0 = inputs[0] # model.input_layer()
-embeds_1 = model.gc1([embeds_0] + inputs[1:])
-embeds_2 = model.gc2([embeds_1] + inputs[1:])
-# embeds_3 = gc2([embeds_2] + inputs[1:])
-scores = model.clf_bias(embeds_2)
-preds = torch.argmax(scores, dim=1)
-loss_train = cross_entropy_loss(scores[idx_train], labels_train)
-correct_train = torch.sum(preds[idx_train] == labels_train)
-loss_valid = cross_entropy_loss(scores[idx_valid], labels_valid)
-correct_valid = torch.sum(preds[idx_valid] == labels_valid)
-loss_test = cross_entropy_loss(scores[idx_test], labels_test)
-correct_test = torch.sum(preds[idx_test] == labels_test)
-
-scores_shareu = []
-scores_value = scores.data.cpu().numpy()
-for node in range(12127):
-    scores_t = np.zeros(3) 
-    if (node not in node2adj):
-        scores_shareu.append(scores_t)
-        continue
-
-    adj = list(node2adj[node])
-    
-    # this_doc_embed = doc_embed[node-1739]
-    # adj_embed = output_embed[adj]
-    # adj_coef = softmax(np.matmul(adj_embed, this_doc_embed).reshape(1, -1)).reshape(-1)
-    adj_coef = [1/len(adj)] * len(adj)
-    # print(adj_coef, adj_coef.shape)
-    
-    for user, coef in zip(adj, adj_coef):
-        scores_t += coef * scores_value[user]#-135] # when use score from 2nd GCN
-        # print(output_score[user])
-    # print(scores)
-    scores_shareu.append(scores_t) #/len(adj))
-    # print(node, adj, gold[-1], pred[-1])
-scores_shareu = torch.FloatTensor(np.array(scores_shareu)).cuda()
-preds_shareu = torch.argmax(scores_shareu, dim=1)
-
-correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
-correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
-correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
-train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
-valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
-test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
-print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
-
-scores_shareu += scores
-preds_shareu = torch.argmax(scores_shareu, dim=1)
-correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
-correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
-correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
-train_acc_shareu = correct_train_shareu.item()/labels_train.size(0)
-valid_acc_shareu = correct_valid_shareu.item()/labels_valid.size(0)
-test_acc_shareu = correct_test_shareu.item()/labels_test.size(0)
-print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
+test_helper()
 
 # fout = open('%s_unsup_pred.pickle' % DATASET, 'wb')
 # preds_numpy = preds_shareu.data.cpu().numpy()
