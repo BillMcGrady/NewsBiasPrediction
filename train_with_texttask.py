@@ -57,9 +57,9 @@ HIDDEN = args['hidden']
 BASES = args['bases']
 DO = args['dropout']
 use_cuda = True
-MODEL_NAME = DATASET + '_skipall_withtext_testttt'
-# LOAD_MODEL_NAME = DATASET + '_Netonly'
-SUPERVISE_FLAG = True
+MODEL_NAME = DATASET + '_skip_unsup3'
+# LOAD_MODEL_NAME = DATASET + '_skip_unsup1'
+SUPERVISE_FLAG = 'unsup2'   # select from 'supervise'/'unsup1'/'unsup2'
 PRED_TYPE = 'all'   # select from 'net'/'netshareu'/'all'
 
 dirname = os.path.dirname(os.path.realpath(sys.argv[0]))
@@ -69,26 +69,28 @@ with open(dirname + '/' + DATASET + '.pickle', 'rb') as f:
 
 A = data['A']
 y = data['y']
-train_idx = data['train_idx'] #[:135]
+train_idx = data['train_idx'] 
 valid_idx = data['valid_idx']
-# data['test_idx'] # 
-test_idx = data['test_idx'] # np.concatenate((data['train_idx'][135:], data['test_idx']))
+test_idx = data['test_idx'] 
 all_labels = data['all_labels'] 
 all_followees = data['all_followees'] 
 all_nodes = data['all_nodes']
 all_docs = data['all_docs']
+
+if (SUPERVISE_FLAG != 'supervise'):
+    train_idx = data['train_idx'][:135]
+    test_idx = np.concatenate((data['train_idx'][135:], data['test_idx']))
         
 print(len(A), len(all_labels), len(all_followees), len(all_nodes), len(all_docs))
-print(train_idx, test_idx.shape)
+print(train_idx.shape, test_idx.shape)
 y = np.array(y.todense())
 labels = np.argmax(y, axis=1)
 
-
-# fin = open('%s_unsup_pred.pickle' % DATASET, 'rb')
-# label_preds = pkl.load(fin)
-# print(label_preds.shape)
-# fin.close()
-
+if (SUPERVISE_FLAG == 'unsup2'):
+    fin = open('%s_unsup_pred.pickle' % DATASET, 'rb')
+    label_preds = pkl.load(fin)
+    print(label_preds.shape)
+    fin.close()
 
 # print(type(train_idx), len(train_idx))
 # print(type(test_idx), len(test_idx))
@@ -104,6 +106,8 @@ labels = np.argmax(y, axis=1)
 # Get dataset splits
 idx_train, idx_valid, idx_test = get_splits(y, train_idx, valid_idx, test_idx, VALIDATION)
 idx_train_set, idx_test_set = set(idx_train), set(idx_test)
+if (SUPERVISE_FLAG == 'unsup2'):
+    idx_train_set = idx_test_set
 num_nodes = A[0].shape[0]
 support = len(A)
 
@@ -275,10 +279,10 @@ def test_helper():
     print(train_acc_shareu, valid_acc_shareu, test_acc_shareu)
 
     scores_shareu += scores
-    preds_shareu = torch.argmax(scores_shareu, dim=1)
-    correct_train_shareu = torch.sum(preds_shareu[idx_train] == labels_train)
-    correct_valid_shareu = torch.sum(preds_shareu[idx_valid] == labels_valid)
-    correct_test_shareu = torch.sum(preds_shareu[idx_test] == labels_test)
+    preds_netshareu = torch.argmax(scores_shareu, dim=1)
+    correct_train_shareu = torch.sum(preds_netshareu[idx_train] == labels_train)
+    correct_valid_shareu = torch.sum(preds_netshareu[idx_valid] == labels_valid)
+    correct_test_shareu = torch.sum(preds_netshareu[idx_test] == labels_test)
     train_acc_netshareu = correct_train_shareu.item()/labels_train.size(0)
     valid_acc_netshareu = correct_valid_shareu.item()/labels_valid.size(0)
     test_acc_netshareu = correct_test_shareu.item()/labels_test.size(0)
@@ -330,11 +334,14 @@ def test_helper():
     print(train_acc_all, valid_acc_all, test_acc_all)
     
     if (PRED_TYPE == 'net'):
-        train_acc_sel, valid_acc_sel, test_acc_sel = train_acc_net, valid_acc_net, test_acc_net
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
+            train_acc_net, valid_acc_net, test_acc_net, preds)
     elif (PRED_TYPE == 'netshareu'):
-        train_acc_sel, valid_acc_sel, test_acc_sel = train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
+            train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu, preds_netshareu)
     elif (PRED_TYPE == 'all'):
-        train_acc_sel, valid_acc_sel, test_acc_sel = train_acc_all, valid_acc_all, test_acc_all
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
+            train_acc_all, valid_acc_all, test_acc_all, preds_all)
     else:
         print('wrong PRED_TYPE')
         exit()
@@ -345,7 +352,7 @@ def test_helper():
         [train_acc_nettext, valid_acc_nettext, test_acc_nettext], 
         [train_acc_all, valid_acc_all, test_acc_all]]
     return (loss_train.item(), loss_valid.item(), loss_test.item(), 
-        train_acc_sel, valid_acc_sel, test_acc_sel, result_table)
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel, result_table)
 
 # Fit
 for epoch in range(1, NB_EPOCH + 1):
@@ -361,17 +368,7 @@ for epoch in range(1, NB_EPOCH + 1):
     embeds_1 = model.gc1([embeds_0] + inputs[1:])
     embeds_2 = model.gc2([embeds_1] + inputs[1:])
     embeds_final = embeds_2
-    # print(embeds_1.size())
-    # print(embeds_1[:10])
-
     scores = model.clf_bias(embeds_2)
-    # embeds_2 = model.gc2([embeds_1] + inputs[1:])
-    # embeds_3 = model.gc2([embeds_2] + inputs[1:])
-    # scores = model.gc3([embeds_3] + inputs[1:])
-    # print(scores.size())
-    # print(scores[:10])
-    # exit()
-
     loss_train = cross_entropy_loss(scores[idx_train], labels_train)
 
     # supervised case
@@ -455,16 +452,18 @@ for epoch in range(1, NB_EPOCH + 1):
         
         if (len(doctext_flag) > 0):
             scores_text = model.clf_bias(batch_input)
-            loss_text = cross_entropy_loss(scores_text[doctext_flag], 
-                torch.LongTensor(labels[docnode_pos_idx][doctext_flag]).cuda().view(-1))
-        else:
+            if (SUPERVISE_FLAG == 'supervise'):
+                loss_text = cross_entropy_loss(scores_text[doctext_flag], 
+                    torch.LongTensor(labels[docnode_pos_idx][doctext_flag]).cuda().view(-1))
+            elif(SUPERVISE_FLAG == 'unsup2'):
+                loss_text = cross_entropy_loss(scores_text[doctext_flag], 
+                    torch.LongTensor(label_preds[docnode_pos_idx][doctext_flag]).cuda().view(-1))
+        else: 
             loss_text = torch.FloatTensor([0]).cuda()
         # print(scores_text[doctext_flag].size())
         # print(loss_text)
 
-        # print(loss_train.item(), loss_text_node.item())
         loss_train += 1.0 * loss_text_node + loss_text
-        # print(loss_train)
         if (loss_train.item() == 0):
             continue
         loss_train.backward()
@@ -477,7 +476,7 @@ for epoch in range(1, NB_EPOCH + 1):
     if epoch % 1 == 0:
 
         (loss_train_val, loss_valid_val, loss_test_val, 
-        train_acc_sel, valid_acc_sel, test_acc_sel, result_table) = test_helper()
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel, result_table) = test_helper()
         
         print("Epoch: {:04d}".format(epoch),
               "train_loss= {:.4f}".format(loss_train_val),
@@ -511,10 +510,12 @@ fout.close()
 
 # Testing
 model.load_state_dict(torch.load('result/%s' % (MODEL_NAME)))
-test_helper()
-
-# fout = open('%s_unsup_pred.pickle' % DATASET, 'wb')
-# preds_numpy = preds_shareu.data.cpu().numpy()
-# print(preds_numpy.shape)
-# pkl.dump(preds_numpy, fout)
-# fout.close()
+(loss_train_val, loss_valid_val, loss_test_val, 
+    train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel, result_table) = test_helper()
+        
+if (SUPERVISE_FLAG == 'unsup1'):
+    fout = open('%s_unsup_pred.pickle' % DATASET, 'wb')
+    preds_numpy = preds_sel.data.cpu().numpy()
+    print(preds_numpy.shape)
+    pkl.dump(preds_numpy, fout)
+    fout.close()
