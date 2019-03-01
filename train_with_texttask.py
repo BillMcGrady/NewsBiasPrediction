@@ -57,9 +57,9 @@ HIDDEN = args['hidden']
 BASES = args['bases']
 DO = args['dropout']
 use_cuda = True
-MODEL_NAME = DATASET + '_skip_unsup3'
+MODEL_NAME = DATASET + '_hlstm30'
 # LOAD_MODEL_NAME = DATASET + '_skip_unsup1'
-SUPERVISE_FLAG = 'unsup2'   # select from 'supervise'/'unsup1'/'unsup2'
+SUPERVISE_FLAG = 'supervise'   # select from 'supervise'/'unsup1'/'unsup2'
 PRED_TYPE = 'all'   # select from 'net'/'netshareu'/'all'
 
 dirname = os.path.dirname(os.path.realpath(sys.argv[0]))
@@ -193,7 +193,7 @@ print(len(node2adj))
 # Compile model
 num_features = 16
 model = GCNModel(num_features, num_nodes, HIDDEN, support, BASES, y.shape[1], 
-    text_model='SkipThought', relation='distmult')
+    text_model='HLSTM', relation='distmult')
 # model.load_state_dict(torch.load('result/%s' % (LOAD_MODEL_NAME)))
 print(len(list(model.parameters())))
 
@@ -204,7 +204,7 @@ for p in parameters:
 optimizer = optim.Adam(parameters,
                        lr=LR, weight_decay=L2)
 
-cross_entropy_loss = nn.CrossEntropyLoss(reduction='mean')
+cross_entropy_loss = nn.CrossEntropyLoss(reduction='sum')
 bce_loss = nn.BCELoss(reduction='mean')
 
 inputs = [sparse_mx_to_torch_sparse_tensor(item) for item in [X] + A]
@@ -225,7 +225,7 @@ if (use_cuda):
 best_acc, best_test_acc = 0, 0
 best_loss = 10000000
 num_docs = 12127-1742
-text_batch_size = num_docs
+text_batch_size = 30
 best_result, best_test_result = None, None
 
 def test_helper():
@@ -369,7 +369,10 @@ for epoch in range(1, NB_EPOCH + 1):
     embeds_2 = model.gc2([embeds_1] + inputs[1:])
     embeds_final = embeds_2
     scores = model.clf_bias(embeds_2)
-    loss_train = cross_entropy_loss(scores[idx_train], labels_train)
+    loss_train = cross_entropy_loss(scores[idx_train], labels_train) * 10
+    if (SUPERVISE_FLAG == 'unsup2'):
+        loss_train += cross_entropy_loss(scores[idx_test], 
+            torch.LongTensor(label_preds[idx_test]).cuda().view(-1)) * 10
 
     # supervised case
     # doctext_idx_list = torch.LongTensor(idx_train[135:]-1742).cuda()
@@ -387,8 +390,8 @@ for epoch in range(1, NB_EPOCH + 1):
     #     torch.cuda.LongTensor(label_preds[idx_test]))
     # loss_train += loss_text
 
-    # loss_train.backward()
-    # optimizer.step()
+    loss_train.backward()
+    optimizer.step()
     '''
     rela1_scores = torch.sigmoid(model.clf_rela1
         (embeds_final[rela1[0]], embeds_final[rela1[1]]).view(-1))
@@ -463,7 +466,7 @@ for epoch in range(1, NB_EPOCH + 1):
         # print(scores_text[doctext_flag].size())
         # print(loss_text)
 
-        loss_train += 1.0 * loss_text_node + loss_text
+        loss_train = 1.0 * loss_text_node + loss_text
         if (loss_train.item() == 0):
             continue
         loss_train.backward()
@@ -503,7 +506,7 @@ for epoch in range(1, NB_EPOCH + 1):
 
 print(best_result)
 print(best_test_result)
-fout = open('result_summary.txt', 'a')
+fout = open('result_summary_time.txt', 'a')
 fout.write(str(best_result) + '\n')
 fout.write(str(best_test_result) + '\n')
 fout.close()
