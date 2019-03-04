@@ -45,6 +45,10 @@ fp.add_argument('--testing', dest='validation', action='store_false')
 ap.set_defaults(validation=True)
 
 args = vars(ap.parse_args())
+TEXT_MODEL = 'HLSTM' # select from 'SkipThought'/'HLSTM'
+if (TEXT_MODEL == 'HLSTM'):
+    args['learnrate'] *= 0.1
+    args['epochs'] = 50
 print(args)
 
 # Define parameters
@@ -57,10 +61,13 @@ HIDDEN = args['hidden']
 BASES = args['bases']
 DO = args['dropout']
 use_cuda = True
-MODEL_NAME = DATASET + '_hlstm30'
+MODEL_NAME = DATASET + '_64hlstm30_withtext'
 # LOAD_MODEL_NAME = DATASET + '_skip_unsup1'
 SUPERVISE_FLAG = 'supervise'   # select from 'supervise'/'unsup1'/'unsup2'
-PRED_TYPE = 'all'   # select from 'net'/'netshareu'/'all'
+PRED_TYPE = 'all'   # select from 'net'/'netshareu'/'text'/all'
+UES_BIAS = False
+num_docs = 12127-1742
+text_batch_size = 30
 
 dirname = os.path.dirname(os.path.realpath(sys.argv[0]))
 
@@ -82,7 +89,7 @@ if (SUPERVISE_FLAG != 'supervise'):
     test_idx = np.concatenate((data['train_idx'][135:], data['test_idx']))
         
 print(len(A), len(all_labels), len(all_followees), len(all_nodes), len(all_docs))
-print(train_idx.shape, test_idx.shape)
+print(len(train_idx), len(valid_idx), len(test_idx))
 y = np.array(y.todense())
 labels = np.argmax(y, axis=1)
 
@@ -107,7 +114,7 @@ if (SUPERVISE_FLAG == 'unsup2'):
 idx_train, idx_valid, idx_test = get_splits(y, train_idx, valid_idx, test_idx, VALIDATION)
 idx_train_set, idx_test_set = set(idx_train), set(idx_test)
 if (SUPERVISE_FLAG == 'unsup2'):
-    idx_train_set = idx_test_set
+    idx_train_set = set(idx_test) | set(idx_valid)
 num_nodes = A[0].shape[0]
 support = len(A)
 
@@ -193,7 +200,7 @@ print(len(node2adj))
 # Compile model
 num_features = 16
 model = GCNModel(num_features, num_nodes, HIDDEN, support, BASES, y.shape[1], 
-    text_model='HLSTM', relation='distmult')
+    text_model=TEXT_MODEL, bias_feature=UES_BIAS, relation='distmult')
 # model.load_state_dict(torch.load('result/%s' % (LOAD_MODEL_NAME)))
 print(len(list(model.parameters())))
 
@@ -204,7 +211,10 @@ for p in parameters:
 optimizer = optim.Adam(parameters,
                        lr=LR, weight_decay=L2)
 
-cross_entropy_loss = nn.CrossEntropyLoss(reduction='sum')
+if (TEXT_MODEL == 'HLSTM'):
+    cross_entropy_loss = nn.CrossEntropyLoss(reduction='sum')
+else:
+    cross_entropy_loss = nn.CrossEntropyLoss(reduction='mean')
 bce_loss = nn.BCELoss(reduction='mean')
 
 inputs = [sparse_mx_to_torch_sparse_tensor(item) for item in [X] + A]
@@ -224,11 +234,9 @@ if (use_cuda):
 
 best_acc, best_test_acc = 0, 0
 best_loss = 10000000
-num_docs = 12127-1742
-text_batch_size = 30
 best_result, best_test_result = None, None
 
-def test_helper():
+def test_helper(prev_preds=None):
     # Predict on full dataset
     embeds_0 = inputs[0] # model.input_layer()
     embeds_1 = model.gc1([embeds_0] + inputs[1:])
@@ -335,16 +343,27 @@ def test_helper():
     
     if (PRED_TYPE == 'net'):
         train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
-            train_acc_net, valid_acc_net, test_acc_net, preds)
+            train_acc_net, valid_acc_net, test_acc_net, preds.data.cpu().numpy())
     elif (PRED_TYPE == 'netshareu'):
         train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
-            train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu, preds_netshareu)
+            train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu, preds_netshareu.data.cpu().numpy())
+    elif (PRED_TYPE == 'text'):
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
+            train_acc_text, valid_acc_text, test_acc_text, preds_text.data.cpu().numpy())
     elif (PRED_TYPE == 'all'):
         train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
-            train_acc_all, valid_acc_all, test_acc_all, preds_all)
+            train_acc_all, valid_acc_all, test_acc_all, preds_all.data.cpu().numpy())
     else:
         print('wrong PRED_TYPE')
         exit()
+    # if (SUPERVISE_FLAG in ['unsup1', 'unsup2']):
+    #     preds_all_numpy = preds_all.data.cpu().numpy()
+    #     print(type(preds_all_numpy), type(prev_preds))
+    #     consist_val = np.sum(preds_all_numpy[test_idx] == prev_preds[test_idx])
+    #     consist_acc = consist_val/labels_test.size(0)
+    #     train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel = (
+    #         train_acc_all, consist_acc, test_acc_all, preds_all_numpy)
+
     result_table = [[train_acc_net, valid_acc_net, test_acc_net], 
         [train_acc_shareu, valid_acc_shareu, test_acc_shareu], 
         [train_acc_netshareu, valid_acc_netshareu, test_acc_netshareu], 
@@ -355,8 +374,9 @@ def test_helper():
         train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel, result_table)
 
 # Fit
+prev_preds = np.zeros(num_nodes)
 for epoch in range(1, NB_EPOCH + 1):
-    # break
+    break
 
     # Log wall-clock time
     t = time.time()
@@ -369,10 +389,15 @@ for epoch in range(1, NB_EPOCH + 1):
     embeds_2 = model.gc2([embeds_1] + inputs[1:])
     embeds_final = embeds_2
     scores = model.clf_bias(embeds_2)
-    loss_train = cross_entropy_loss(scores[idx_train], labels_train) * 10
+    loss_train = cross_entropy_loss(scores[idx_train], labels_train) 
     if (SUPERVISE_FLAG == 'unsup2'):
-        loss_train += cross_entropy_loss(scores[idx_test], 
-            torch.LongTensor(label_preds[idx_test]).cuda().view(-1)) * 10
+        scores_comb = torch.cat((scores[idx_valid], scores[idx_test]), 0)
+        labels_comb = torch.cat((
+            torch.LongTensor(label_preds[idx_valid]).cuda().view(-1),
+            torch.LongTensor(label_preds[idx_test]).cuda().view(-1)), 0)
+        loss_train += cross_entropy_loss(scores_comb, labels_comb)
+    if (TEXT_MODEL == 'HLSTM'):
+        loss_train *= 10
 
     # supervised case
     # doctext_idx_list = torch.LongTensor(idx_train[135:]-1742).cuda()
@@ -418,7 +443,7 @@ for epoch in range(1, NB_EPOCH + 1):
     
     text_idx_perm = np.random.permutation(num_docs)
     for start in range(0, num_docs, text_batch_size):
-        if (PRED_TYPE != 'all'):
+        if (PRED_TYPE not in ['text', 'all']):
             break
         model.zero_grad()
         end = start + text_batch_size
@@ -467,6 +492,7 @@ for epoch in range(1, NB_EPOCH + 1):
         # print(loss_text)
 
         loss_train = 1.0 * loss_text_node + loss_text
+        # loss_train = loss_text
         if (loss_train.item() == 0):
             continue
         loss_train.backward()
@@ -479,7 +505,8 @@ for epoch in range(1, NB_EPOCH + 1):
     if epoch % 1 == 0:
 
         (loss_train_val, loss_valid_val, loss_test_val, 
-        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel, result_table) = test_helper()
+        train_acc_sel, valid_acc_sel, test_acc_sel, preds_sel, result_table) = test_helper(prev_preds)
+        prev_preds = preds_sel
         
         print("Epoch: {:04d}".format(epoch),
               "train_loss= {:.4f}".format(loss_train_val),
@@ -506,7 +533,7 @@ for epoch in range(1, NB_EPOCH + 1):
 
 print(best_result)
 print(best_test_result)
-fout = open('result_summary_time.txt', 'a')
+fout = open('result_%s.txt' % DATASET, 'a')
 fout.write(str(best_result) + '\n')
 fout.write(str(best_test_result) + '\n')
 fout.close()
@@ -518,7 +545,7 @@ model.load_state_dict(torch.load('result/%s' % (MODEL_NAME)))
         
 if (SUPERVISE_FLAG == 'unsup1'):
     fout = open('%s_unsup_pred.pickle' % DATASET, 'wb')
-    preds_numpy = preds_sel.data.cpu().numpy()
+    preds_numpy = preds_sel
     print(preds_numpy.shape)
     pkl.dump(preds_numpy, fout)
     fout.close()

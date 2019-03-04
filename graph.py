@@ -75,20 +75,20 @@ def process_batch(all_text_input, all_text_lengths,
 
 class GCNModel(nn.Module):
     def __init__(self, num_features, num_nodes, hidden, support, num_bases, num_classes, 
-        text_model='SkipThought', relation='distmult'):
+        text_model='SkipThought', bias_feature=False, relation='distmult'):
         super(GCNModel, self).__init__()
 
-        self.input_layer = InputLayer(num_features, text_model)
+        self.input_layer = InputLayer(num_features, text_model, bias_feature)
         self.gc1 = GraphConvolution(num_nodes, hidden, support, num_bases=num_bases,
             activation='relu')
-        self.gc2 = GraphConvolution(hidden, hidden, support, num_bases=num_bases,
+        self.gc2 = GraphConvolution(hidden, num_features, support, num_bases=num_bases,
                     activation='relu')
         # gc3 = GraphConvolution(HIDDEN, HIDDEN, support, num_bases=BASES,
         #             activation='relu')
         # gc4 = GraphConvolution(HIDDEN, y.shape[1], support, num_bases=BASES,
         #             activation='softmax')
 
-        self.clf_bias = nn.Linear(hidden, num_classes)
+        self.clf_bias = nn.Linear(num_features, num_classes)
         if (relation == 'bilinear'):
             self.clf_rela1, self.clf_rela2 = nn.Bilinear(hidden, hidden, 1), nn.Bilinear(hidden, hidden, 1)
         elif (relation == 'distmult'):
@@ -98,19 +98,30 @@ class GCNModel(nn.Module):
             exit()
 
 class InputLayer(nn.Module):
-    def __init__(self, num_feature, text_model='SkipThought'):
+    def __init__(self, num_feature, text_model='SkipThought', bias_feature=False):
 
         super(InputLayer, self).__init__()
 
         self.node_embedding = nn.Embedding(12127, num_feature).cuda()
         # self.node_embedding.weight.requires_grad=False
         self.text_model = text_model
+        self.bias_feature = bias_feature
+
+        if (bias_feature):
+            fin = open('data/news_article_feature.pickle', 'rb')
+            feature_matrix = pickle.load(fin)
+            self.feature_matrix = torch.FloatTensor(feature_matrix).cuda()
+            print('bias feature shape', feature_matrix.shape)
+            fin.close()
 
         if (text_model == 'SkipThought'):
             self.doc_embedding = nn.Embedding(12127-1742, 4800).cuda()
             self.doc_embedding.weight.requires_grad=False
-            self.linear = nn.Linear(4800, num_feature).cuda()
-            
+            if (bias_feature):
+                self.linear = nn.Linear(4800+141, num_feature).cuda()
+            else:
+                self.linear = nn.Linear(4800, num_feature).cuda()
+
             skip_doc = pickle.load(open('data/doc_embeddings_skipthought_py2.pkl', 'rb'))
                 
             f=open("data/mygraph.mapping.supervised","r")
@@ -146,6 +157,7 @@ class InputLayer(nn.Module):
             text_inputs_raw = []
             for doc_id in range(1742, 12127):
                 text_inputs_raw.append(doc_inputs_raw[reverse_mapping[doc_id]])
+
             '''
             word_to_idx = {}
             word_embeddings = []
@@ -173,8 +185,12 @@ class InputLayer(nn.Module):
             print(len(word_to_idx), word_embeddings.shape)
 
             all_text_input, all_text_lengths = generate_examples_hlstm(text_inputs_raw, word_to_idx)
-            HIDDEN_SIZE = 16
+            HIDDEN_SIZE = 64
             self.doc_hlstm = HLSTM(HIDDEN_SIZE, word_to_idx, word_embeddings)
+            if (bias_feature):
+                self.linear = nn.Linear(HIDDEN_SIZE+141, num_feature).cuda()
+            else:
+                self.linear = nn.Linear(HIDDEN_SIZE, num_feature).cuda()
             self.all_text_input, self.all_text_lengths = all_text_input, all_text_lengths
             print('\t\t test', len(self.all_text_input), len(self.all_text_lengths))
             # exit()
@@ -191,14 +207,22 @@ class InputLayer(nn.Module):
         return all_embed
 
     def get_doc_embed(self, idx): 
+        if (self.bias_feature):
+            bias_feat = self.feature_matrix.index_select(0, idx)
+
         if (self.text_model == 'SkipThought'):
-            text_embeds = self.linear(self.doc_embedding(idx))
+            text_embeds = self.doc_embedding(idx)
+            if (self.bias_feature):
+                text_embeds = torch.cat((text_embeds, bias_feat), 1)
+            text_embeds = self.linear(text_embeds)
         elif (self.text_model == 'HLSTM'):
             # print('\t\t --- doc embedding used')
             batch_input, batch_sent_lengths, batch_doc_lengths = process_batch(
                 self.all_text_input, self.all_text_lengths, idx, 400000)
             text_embeds = self.doc_hlstm(batch_input, batch_sent_lengths, batch_doc_lengths)
-
+            if (self.bias_feature):
+                text_embeds = torch.cat((text_embeds, bias_feat), 1) 
+            text_embeds = self.linear(text_embeds)
         return text_embeds
 
 
