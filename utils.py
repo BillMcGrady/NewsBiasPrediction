@@ -1,8 +1,7 @@
-from __future__ import print_function
-
 import scipy.sparse as sp
 import torch
 import numpy as np
+import pickle as pkl
 
 def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix to a torch sparse tensor."""
@@ -19,213 +18,110 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
         sparse_tensor = torch.sparse.FloatTensor(shape[0], shape[1])
     return sparse_tensor
 
-def csr_zero_rows(csr, rows_to_zero):
-    """Set rows given by rows_to_zero in a sparse csr matrix to zero.
-    NOTE: Inplace operation! Does not return a copy of sparse matrix."""
-    rows, cols = csr.shape
-    mask = np.ones((rows,), dtype=np.bool)
-    mask[rows_to_zero] = False
-    nnz_per_row = np.diff(csr.indptr)
 
-    mask = np.repeat(mask, nnz_per_row)
-    nnz_per_row[rows_to_zero] = 0
-    csr.data = csr.data[mask]
-    csr.indices = csr.indices[mask]
-    csr.indptr[1:] = np.cumsum(nnz_per_row)
-    csr.eliminate_zeros()
-    return csr
+def load_data(args, dirname, use_cuda, SUPERVISE_FLAG):
 
+    # Load Data
+    DATASET = args['dataset']
+    with open(dirname + '/data/' + DATASET + '.pickle', 'rb') as f:
+        raw_data = pkl.load(f)
+    A = raw_data['A']
+    y = raw_data['y']
+    idx_train = raw_data['train_idx'] 
+    idx_valid = raw_data['valid_idx']
+    idx_test = raw_data['test_idx'] 
+    all_labels = raw_data['all_labels'] 
+    all_poli_users = raw_data['all_followees'] 
+    all_share_users = raw_data['all_nodes']
+    all_docs = raw_data['all_docs']
+    num_docs = len(all_docs)
+    num_poli_users = len(all_poli_users)
+    y = np.array(y.todense())
+    labels = np.argmax(y, axis=1)
+    num_nodes = A[0].shape[0]
+    num_non_docs = num_nodes - num_docs
+    support = len(A)
+    data = {}
+    
+    # # test with reduced network
+    # with open(dirname + '/newsbias_random_1_untyped_40.pickle', 'rb') as f:
+    #     data_reduced = pkl.load(f)
+    # A = data_reduced['A']
 
-def csc_zero_cols(csc, cols_to_zero):
-    """Set rows given by cols_to_zero in a sparse csc matrix to zero.
-    NOTE: Inplace operation! Does not return a copy of sparse matrix."""
-    rows, cols = csc.shape
-    mask = np.ones((cols,), dtype=np.bool)
-    mask[cols_to_zero] = False
-    nnz_per_row = np.diff(csc.indptr)
+    # only use the labels of political users at training time in the distant supervision case ('unsup1')
+    if (SUPERVISE_FLAG != 'supervise'):
+        idx_train = raw_data['train_idx'][:num_poli_users]
+        idx_test = np.concatenate((raw_data['train_idx'][num_poli_users:], raw_data['test_idx']))
+    # after training only with labels of political users, use predicted labels of articles to train again ('unsup2')
+    idx_train_set, idx_test_set = set(idx_train), set(idx_test)
+    if (SUPERVISE_FLAG == 'unsup2'):
+        idx_train_set = set(idx_test) | set(idx_valid)
+        fin = open('temp/%s_unsup_pred.pickle' % DATASET, 'rb')
+        label_preds = pkl.load(fin)
+        data['label_preds'] = label_preds
+        print(label_preds.shape)
+        fin.close()
+    
+    # print(len(A), len(all_labels), len(all_poli_users), len(all_share_users), len(all_docs))
+    # print(len(idx_train), len(idx_valid), len(idx_test))
+    
+    # Define one-hot dummy feature matrix 
+    X = sp.eye(num_nodes).tocsr() 
+    # Normalize adjacency matrices individually
+    for i in range(len(A)):
+        d = np.array(A[i].sum(1)).flatten()
+        d_inv = 1. / d
+        d_inv[np.isinf(d_inv)] = 0.
+        D_inv = sp.diags(d_inv)
+        A[i] = D_inv.dot(A[i]).tocsr()
+        
+    inputs = [sparse_mx_to_torch_sparse_tensor(item) for item in [X] + A]
+    # print(len(inputs))
+    # for input in inputs:
+    #     print(input.size())
+    labels_train = torch.LongTensor(labels[idx_train])
+    labels_valid = torch.LongTensor(labels[idx_valid])
+    labels_test = torch.LongTensor(labels[idx_test])
+        
+    if (use_cuda):
+        inputs = [item.cuda() for item in inputs]
+        labels_train = labels_train.cuda()
+        labels_valid = labels_valid.cuda()
+        labels_test = labels_test.cuda()
 
-    mask = np.repeat(mask, nnz_per_row)
-    nnz_per_row[cols_to_zero] = 0
-    csc.data = csc.data[mask]
-    csc.indices = csc.indices[mask]
-    csc.indptr[1:] = np.cumsum(nnz_per_row)
-    csc.eliminate_zeros()
-    return csc
+    x_pos, y_pos = A[0].tocoo().row, A[0].tocoo().col
+    all_docs_set, all_shareu_set = set(all_docs), set(all_share_users)
+    node2adj = {}
+    for xi, yi in zip(x_pos, y_pos):
+        if (xi not in all_docs_set or yi not in all_shareu_set):
+            continue
+        if xi not in node2adj:
+            node2adj[xi] = []
+        node2adj[xi].append(yi)
+    num_edges_list, num_labels_list = [], [0, 0, 0]
+    for node in idx_test:
+        if node not in node2adj:
+            num_edges_list.append(0)
+        else:
+            num_edges_list.append(len(node2adj[node]))
+        num_labels_list[labels[node]] += 1
+    # print(len(num_edges_list), sum(num_edges_list)/len(num_edges_list))
+    # print(sum(num_labels_list), np.array(num_labels_list)/sum(num_labels_list))
+    # print(len(node2adj))
 
+    data['idx_train'] = idx_train
+    data['idx_valid'] = idx_valid
+    data['idx_test'] = idx_test
+    data['idx_train_set'] = idx_train_set 
+    data['idx_test_set'] = idx_test_set 
+    data['inputs'] = inputs 
+    data['labels_train'] = labels_train 
+    data['labels_valid'] = labels_valid 
+    data['labels_test'] = labels_test
+    data['num_nodes'] = num_nodes
+    data['num_docs'] = num_docs 
+    data['num_non_docs'] = num_non_docs
+    data['node2adj'] = node2adj
+    data['support'] = support
 
-def sp_vec_from_idx_list(idx_list, dim):
-    """Create sparse vector of dimensionality dim from a list of indices."""
-    shape = (dim, 1)
-    data = np.ones(len(idx_list))
-    row_ind = list(idx_list)
-    col_ind = np.zeros(len(idx_list))
-    return sp.csr_matrix((data, (row_ind, col_ind)), shape=shape)
-
-
-def sp_row_vec_from_idx_list(idx_list, dim):
-    """Create sparse vector of dimensionality dim from a list of indices."""
-    shape = (1, dim)
-    data = np.ones(len(idx_list))
-    row_ind = np.zeros(len(idx_list))
-    col_ind = list(idx_list)
-    return sp.csr_matrix((data, (row_ind, col_ind)), shape=shape)
-
-
-def get_neighbors(adj, nodes):
-    """Takes a set of nodes and a graph adjacency matrix and returns a set of neighbors."""
-    sp_nodes = sp_row_vec_from_idx_list(list(nodes), adj.shape[1])
-    sp_neighbors = sp_nodes.dot(adj)
-    neighbors = set(sp.find(sp_neighbors)[1])  # convert to set of indices
-    return neighbors
-
-
-def bfs(adj, roots):
-    """
-    Perform BFS on a graph given by an adjaceny matrix adj.
-    Can take a set of multiple root nodes.
-    Root nodes have level 0, first-order neighors have level 1, and so on.]
-    """
-    visited = set()
-    current_lvl = set(roots)
-    while current_lvl:
-        for v in current_lvl:
-            visited.add(v)
-
-        next_lvl = get_neighbors(adj, current_lvl)
-        next_lvl -= visited  # set difference
-        yield next_lvl
-
-        current_lvl = next_lvl
-
-
-def bfs_relational(adj_list, roots):
-    """
-    BFS for graphs with multiple edge types. Returns list of level sets.
-    Each entry in list corresponds to relation specified by adj_list.
-    """
-    visited = set()
-    current_lvl = set(roots)
-
-    next_lvl = list()
-    for rel in range(len(adj_list)):
-        next_lvl.append(set())
-
-    while current_lvl:
-
-        for v in current_lvl:
-            visited.add(v)
-
-        for rel in range(len(adj_list)):
-            next_lvl[rel] = get_neighbors(adj_list[rel], current_lvl)
-            next_lvl[rel] -= visited  # set difference
-
-        yield next_lvl
-
-        current_lvl = set.union(*next_lvl)
-
-
-def bfs_sample(adj, roots, max_lvl_size):
-    """
-    BFS with node dropout. Only keeps random subset of nodes per level up to max_lvl_size.
-    'roots' should be a mini-batch of nodes (set of node indices).
-
-    NOTE: In this implementation, not every node in the mini-batch is guaranteed to have
-    the same number of neighbors, as we're sampling for the whole batch at the same time.
-    """
-    visited = set(roots)
-    current_lvl = set(roots)
-    while current_lvl:
-
-        next_lvl = get_neighbors(adj, current_lvl)
-        next_lvl -= visited  # set difference
-
-        for v in next_lvl:
-            visited.add(v)
-
-        yield next_lvl
-
-        current_lvl = next_lvl
-
-
-def get_splits(y, train_idx, valid_idx, test_idx, validation=True):
-    # Make dataset splits
-    # np.random.shuffle(train_idx)
-    if validation:
-        idx_train = train_idx[len(train_idx) / 5:]
-        idx_val = train_idx[:len(train_idx) / 5]
-        idx_test = idx_val  # report final score on validation set for hyperparameter optimization
-    else:
-        idx_train = train_idx
-        idx_val = valid_idx  # no validation
-        idx_test = test_idx
-
-    # y_train = np.zeros(y.shape)
-    # y_val = np.zeros(y.shape)
-    # y_test = np.zeros(y.shape)
-
-    # y_train[idx_train] = np.array(y[idx_train].todense())
-    # y_val[idx_val] = np.array(y[idx_val].todense())
-    # y_test[idx_test] = np.array(y[idx_test].todense())
-
-    return idx_train, idx_val, idx_test
-
-
-def normalize_adj(adj, symmetric=True):
-    if symmetric:
-        d = sp.diags(np.power(np.array(adj.sum(1)), -0.5).flatten())
-        a_norm = adj.dot(d).transpose().dot(d).tocsr()
-    else:
-        d = sp.diags(np.power(np.array(adj.sum(1)), -1).flatten())
-        a_norm = d.dot(adj).tocsr()
-    return a_norm
-
-
-def preprocess_adj(adj, symmetric=True):
-    adj = normalize_adj(adj, symmetric)
-    return adj
-
-
-def sample_mask(idx, l):
-    mask = np.zeros(l)
-    mask[idx] = 1
-    return np.array(mask, dtype=np.bool)
-
-
-def categorical_crossentropy(preds, labels):
-    return np.mean(-np.log(np.extract(labels, preds)))
-
-
-def binary_crossentropy(preds, labels):
-    return np.mean(-labels*np.log(preds) - (1-labels)*np.log(1-preds))
-
-
-def two_class_accuracy(preds, labels, threshold=0.5):
-    return np.mean(np.equal(labels, preds > 0.5))
-
-
-def accuracy(preds, labels):
-    return np.mean(np.equal(np.argmax(labels, 1), np.argmax(preds, 1)))
-
-
-def evaluate_preds(preds, labels, indices):
-
-    split_loss = list()
-    split_acc = list()
-
-    for y_split, idx_split in zip(labels, indices):
-        split_loss.append(categorical_crossentropy(preds[idx_split], y_split[idx_split]))
-        split_acc.append(accuracy(preds[idx_split], y_split[idx_split]))
-
-    return split_loss, split_acc
-
-
-def evaluate_preds_sigmoid(preds, labels, indices):
-
-    split_loss = list()
-    split_acc = list()
-
-    for y_split, idx_split in zip(labels, indices):
-        split_loss.append(binary_crossentropy(preds[idx_split], y_split[idx_split]))
-        split_acc.append(two_class_accuracy(preds[idx_split], y_split[idx_split]))
-
-    return split_loss, split_acc
+    return raw_data, data

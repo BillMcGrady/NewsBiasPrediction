@@ -5,9 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence #, pad_sequence, pack_sequence
-
-from utils import *
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence 
 
 class HLSTM(torch.nn.Module):
     def __init__(self, hidden_size, word_to_idx, word_embeddings):
@@ -54,9 +52,6 @@ class HLSTM(torch.nn.Module):
         return sent_embeds
 
     def forward(self, batch_input, sentence_lengths, document_lengths):
-        """
-
-        """
         # _, sent_sort_index = torch.sort(sentence_lengths, descending=True)
         sent_sort_index = sorted(range(len(sentence_lengths)), key=lambda k: sentence_lengths[k], reverse=True)
         sent_sort_index_map = {old: new for new, old in enumerate(sent_sort_index)}

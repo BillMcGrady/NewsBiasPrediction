@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import pickle
 import numpy as np
 import json
@@ -11,6 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn import Parameter
 from HLSTM import HLSTM
+
 
 def generate_examples_hlstm(text_inputs_raw, word_to_idx):
     all_text_input, all_text_lengths = [], []
@@ -40,6 +39,7 @@ def generate_examples_hlstm(text_inputs_raw, word_to_idx):
     print(len(part), max(part), sum(part <= 8), sum(part <= 16), sum(part <= 32), sum(part <= 64))
 
     return np.array(all_text_input), np.array(all_text_lengths)
+
 
 def process_batch(all_text_input, all_text_lengths,
     batch_index, vocab_size, perm=None):
@@ -74,36 +74,30 @@ def process_batch(all_text_input, all_text_lengths,
 
 
 class GCNModel(nn.Module):
-    def __init__(self, num_features, num_nodes, hidden, support, num_bases, num_classes, 
-        text_model='SkipThought', bias_feature=False, relation='distmult'):
+    def __init__(self, data, num_features, num_nodes, hidden, support, num_bases, num_classes, 
+        text_model='SkipThought', bias_feature=False):
         super(GCNModel, self).__init__()
 
-        self.input_layer = InputLayer(num_features, text_model, bias_feature)
+        self.input_layer = InputLayer(data, num_features, text_model, bias_feature)
         self.gc1 = GraphConvolution(num_nodes, hidden, support, num_bases=num_bases,
-            activation='relu')
+            activation='tanh')
         self.gc2 = GraphConvolution(hidden, num_features, support, num_bases=num_bases,
-                    activation='relu')
-        # gc3 = GraphConvolution(HIDDEN, HIDDEN, support, num_bases=BASES,
-        #             activation='relu')
-        # gc4 = GraphConvolution(HIDDEN, y.shape[1], support, num_bases=BASES,
-        #             activation='softmax')
-
+                    activation='tanh')
         self.clf_bias = nn.Linear(num_features, num_classes)
-        if (relation == 'bilinear'):
-            self.clf_rela1, self.clf_rela2 = nn.Bilinear(hidden, hidden, 1), nn.Bilinear(hidden, hidden, 1)
-        elif (relation == 'distmult'):
-            self.clf_rela_embed = nn.Embedding(2, hidden)
-        else:
-            print('relaton type not valid')
-            exit()
+       
 
 class InputLayer(nn.Module):
-    def __init__(self, num_feature, text_model='SkipThought', bias_feature=False):
+    def __init__(self, data, num_feature, text_model='SkipThought', bias_feature=False):
 
         super(InputLayer, self).__init__()
 
-        self.node_embedding = nn.Embedding(12127, num_feature).cuda()
-        # self.node_embedding.weight.requires_grad=False
+        num_nodes = data['num_nodes']  
+        num_docs = data['num_docs']  
+        num_non_docs= data['num_non_docs']
+        
+        # Not used, but kept to reproduce result
+        self.node_embedding = nn.Embedding(num_nodes, num_feature).cuda()
+        self.node_embedding.weight.requires_grad=False
         self.text_model = text_model
         self.bias_feature = bias_feature
 
@@ -111,11 +105,10 @@ class InputLayer(nn.Module):
             fin = open('data/news_article_feature.pickle', 'rb')
             feature_matrix = pickle.load(fin)
             self.feature_matrix = torch.FloatTensor(feature_matrix).cuda()
-            print('bias feature shape', feature_matrix.shape)
             fin.close()
 
         if (text_model == 'SkipThought'):
-            self.doc_embedding = nn.Embedding(12127-1742, 4800).cuda()
+            self.doc_embedding = nn.Embedding(num_docs, 4800).cuda()
             self.doc_embedding.weight.requires_grad=False
             if (bias_feature):
                 self.linear = nn.Linear(4800+141, num_feature).cuda()
@@ -124,7 +117,7 @@ class InputLayer(nn.Module):
 
             skip_doc = pickle.load(open('data/doc_embeddings_skipthought_py2.pkl', 'rb'))
                 
-            f=open("data/mygraph.mapping.supervised","r")
+            f=open("data/mygraph.mapping","r")
             embd_list = []
             while True:
                 l=f.readline()
@@ -132,7 +125,7 @@ class InputLayer(nn.Module):
                     break
                 l=l.strip().split(" ")
                 id=int(l[0])
-                if id<1742:
+                if id < num_non_docs:
                     continue
                 doc=l[1]
                 embd=list(skip_doc[doc])
@@ -142,69 +135,38 @@ class InputLayer(nn.Module):
             self.doc_embedding.weight.data.copy_(torch.from_numpy(embd_list))
         
         elif (text_model == 'HLSTM'):
+            # tokenized_docs.json contains the tokenized content of news articles
             with open('data/tokenized_docs.json') as fin:
                 doc_inputs_raw = json.load(fin)
                 fin.close()
             mapping, reverse_mapping = {}, {}
-            fin = open('data/mygraph.mapping.supervised', 'r')
+            fin = open('data/mygraph.mapping', 'r')
             for line in fin.readlines():
                 vals = line.strip().split()
                 key, idx = vals[1], int(vals[0])
-                mapping[key] = idx-1742
+                mapping[key] = idx-num_non_docs
                 reverse_mapping[idx] = key
             fin.close()
 
             text_inputs_raw = []
-            for doc_id in range(1742, 12127):
+            for doc_id in range(num_non_docs, num_nodes):
                 text_inputs_raw.append(doc_inputs_raw[reverse_mapping[doc_id]])
 
-            '''
-            word_to_idx = {}
-            word_embeddings = []
-            fin = codecs.open('adj/glove.6B.300d.txt', 'r', 'utf8')
-            idx = 0
-            for line in fin.readlines():
-                vals = line.strip().split()
-                word, embed = vals[0], [float(v) for v in vals[1:]]
-                word_to_idx[word] = idx
-                idx += 1
-                word_embeddings.append(embed)
-            fin.close()
-            word_embeddings.append([0] * 300)
-            word_embeddings = np.array(word_embeddings)
-            fout = open('glove.6b.300d.pickle', 'wb')
-            pickle.dump(word_to_idx, fout)
-            pickle.dump(word_embeddings, fout)
-            fout.close()
-            print(len(word_to_idx), word_embeddings.shape)
-            '''
             fin = open('data/glove.6b.300d.pickle', 'rb')
             word_to_idx = pickle.load(fin)
             word_embeddings = pickle.load(fin)
             fin.close()
-            print(len(word_to_idx), word_embeddings.shape)
+            # print(len(word_to_idx), word_embeddings.shape)
 
             all_text_input, all_text_lengths = generate_examples_hlstm(text_inputs_raw, word_to_idx)
             HIDDEN_SIZE = 64
+            BIAS_FEAT_SIZE = 141
             self.doc_hlstm = HLSTM(HIDDEN_SIZE, word_to_idx, word_embeddings)
             if (bias_feature):
-                self.linear = nn.Linear(HIDDEN_SIZE+141, num_feature).cuda()
+                self.linear = nn.Linear(HIDDEN_SIZE+BIAS_FEAT_SIZE, num_feature).cuda()
             else:
                 self.linear = nn.Linear(HIDDEN_SIZE, num_feature).cuda()
             self.all_text_input, self.all_text_lengths = all_text_input, all_text_lengths
-            print('\t\t test', len(self.all_text_input), len(self.all_text_lengths))
-            # exit()
-
-    def forward(self):
-        # index_1 = torch.LongTensor([i for i in range(1742)]).cuda()
-        # index_2 = torch.LongTensor([i for i in range(12127-1742)]).cuda()
-        # all_embed = torch.cat((self.node_embedding(index_1), 
-        #     self.linear(self.doc_embedding(index_2))), 0)
-
-        index_1 = torch.LongTensor([i for i in range(12127)]).cuda()
-        all_embed = self.node_embedding(index_1)
-        
-        return all_embed
 
     def get_doc_embed(self, idx): 
         if (self.bias_feature):
@@ -226,38 +188,30 @@ class InputLayer(nn.Module):
         return text_embeds
 
 
+# This implementation is based on the code at https://github.com/tkipf/relational-gcn/blob/master/rgcn/layers/graph.py
 class GraphConvolution(nn.Module):
     def __init__(self, input_dim, output_dim, support=1, 
-                 init='glorot_uniform', activation='linear',
-                 weights=None, W_regularizer=None, num_bases=-1,
-                 b_regularizer=None, bias=False, dropout=0., **kwargs):
+                 activation='linear', num_bases=-1, bias=False):
         
-        super(GraphConvolution, self).__init__(**kwargs)
+        super(GraphConvolution, self).__init__()
 
-        # self.init = initializations.get(init)
         if (activation == 'linear'):
             self.activation = None
         elif (activation == 'sigmoid'):
             self.activation = nn.Sigmoid()
         elif (activation == 'tanh'):
             self.activation = nn.Tanh()
-        elif (activation == 'relu'):
-            self.activation = nn.Tanh()
-        elif (activation == 'softmax'):
-            self.activation = nn.Softmax(dim=1)
+        else:
+            print('Error: activation function not available')
+            exit()
 
         self.input_dim = input_dim
         self.output_dim = output_dim  # number of features per node
         self.support = support  # filter support / number of weights
-        self.dropout = nn.Dropout(dropout)
 
         assert support >= 1
 
-        # self.W_regularizer = regularizers.get(W_regularizer)
-        # self.b_regularizer = regularizers.get(b_regularizer)
-
         self.bias = bias
-        self.initial_weights = weights
         self.num_bases = num_bases
 
         if self.num_bases > 0:
@@ -273,17 +227,9 @@ class GraphConvolution(nn.Module):
         for idx, item in enumerate(self.W):
             self.register_parameter('W_%d' % idx, item)
 
-        print(self.W[0][:3])
         if self.bias:
             self.b = Parameter(torch.FloatTensor(self.output_dim, 1))
-
-        # self.set_weights(self.initial_weights)
         
-    # def get_output_shape_for(self, input_shapes):
-    #     features_shape = input_shapes[0]
-    #     output_shape = (features_shape[0], self.output_dim)
-    #     return output_shape  # (batch_size, output_dim)
-
     def forward(self, inputs, mask=None):
         features = inputs[0]
         A = inputs[1:]  # list of basis functions
@@ -303,30 +249,18 @@ class GraphConvolution(nn.Module):
         else:
             for a_weight in self.W:
                 supports.append(torch.spmm(features, a_weight))
-        
-        for idx, support in enumerate(supports):
-            flag = torch.sum(torch.isnan(support)) > 0
-            if flag:
-                print('nan in support %d' % idx)
-                exit()
 
         outputs = []
         for i in range(self.support):
             # print(features.size(), A[i].size())
             outputs.append(torch.spmm(A[i], supports[i]))
 
-        for idx, output in enumerate(outputs):
-            flag = torch.sum(torch.isnan(output)) > 0
-            if flag:
-                print('nan in output %d' % idx)
-                exit()
         output = torch.stack(outputs, dim=1).sum(1)            
-
-        # if featureless add dropout to output, by elementwise multiplying with column vector of ones,
-        # with dropout applied to the vector of ones.
-        # if self.featureless:
-        #     output = self.dropout(output)
 
         if self.bias:
             output += self.b
-        return self.activation(output)
+        
+        if self.activation is not None:
+            return self.activation(output)
+        else:
+            return output
